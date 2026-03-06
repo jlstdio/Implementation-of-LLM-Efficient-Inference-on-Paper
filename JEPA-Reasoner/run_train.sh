@@ -22,34 +22,35 @@ echo "║       Config : ${CONFIG}                                 ║"
 echo "╚═══════════════════════════════════════════════════════════╝"
 
 # ── 0. 의존 패키지 설치 ─────────────────────────────────────────────
-echo ""
-echo "[0/4] Installing Python dependencies …"
-pip install --quiet --upgrade \
-    torch \
-    transformers \
-    datasets \
-    accelerate \
-    sentencepiece \
-    pyyaml
+# echo ""
+# echo "[0/4] Installing Python dependencies …"
+# pip install --quiet --upgrade \
+#     torch \
+#     transformers \
+#     datasets \
+#     accelerate \
+#     sentencepiece \
+#     pyyaml
 
 # ── 1. 데이터셋 사전 다운로드 ────────────────────────────────────────
-echo ""
-echo "[1/4] Pre-downloading datasets …"
-python -c "
-from datasets import load_dataset
-print('  → Wikitext-103 (streaming, 캐시 확인)')
-_ = load_dataset('wikitext', 'wikitext-103-raw-v1', split='train', streaming=True)
-print('  → GSM8K (train + test)')
-_ = load_dataset('openai/gsm8k', 'main', split='train')
-_ = load_dataset('openai/gsm8k', 'main', split='test')
-print('  → C4 는 학습 중 스트리밍됩니다.')
-print('  ✓ 데이터셋 준비 완료')
-"
+# echo ""
+# echo "[1/4] Pre-downloading datasets …"
+# python -c "
+# from datasets import load_dataset
+# print('  → Wikitext-103 (streaming, 캐시 확인)')
+# _ = load_dataset('wikitext', 'wikitext-103-raw-v1', split='train', streaming=True)
+# print('  → GSM8K (train + test)')
+# _ = load_dataset('openai/gsm8k', 'main', split='train')
+# _ = load_dataset('openai/gsm8k', 'main', split='test')
+# print('  → C4 는 학습 중 스트리밍됩니다.')
+# print('  ✓ 데이터셋 준비 완료')
+# "
 
 # ── 2. Phase 1: Pretraining ──────────────────────────────────────────
 # Auto-detect available GPUs
 NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
-NUM_GPUS=${NUM_GPUS:-1}
+# NUM_GPUS=${NUM_GPUS:-1}
+NUM_GPUS=0
 echo ""
 echo "  Detected ${NUM_GPUS} GPU(s)"
 
