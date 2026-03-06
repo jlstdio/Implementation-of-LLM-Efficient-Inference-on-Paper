@@ -128,7 +128,6 @@ def load_config(path: str) -> Config:
 
 
 def get_config_from_cli(description: str = "") -> Config:
-    """CLI 인자 ``--config`` 로 YAML 경로를 받아 Config 를 반환한다."""
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "--config", type=str,
