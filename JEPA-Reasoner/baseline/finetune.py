@@ -96,11 +96,13 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     # ── Model (전체 파라미터 학습) ────────────────────────────────────────
+    # device_map="auto" conflicts with DDP; let Trainer handle placement
+    is_distributed = int(os.environ.get("WORLD_SIZE", 1)) > 1
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=torch.float16 if train_cfg["fp16"] else torch.float32,
         trust_remote_code=True,
-        device_map="auto",
+        device_map=None if is_distributed else "auto",
     )
     model.config.use_cache = False
     model.gradient_checkpointing_enable()  # VRAM 절약

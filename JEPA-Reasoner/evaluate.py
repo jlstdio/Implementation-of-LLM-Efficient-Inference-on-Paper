@@ -14,7 +14,6 @@ from config import Config, get_config_from_cli
 
 
 def extract_numerical_answer(text: str) -> str:
-    """GSM8K 형식에서 최종 수치 답(#### 뒤)을 추출한다."""
     m = re.search(r"####\s*(-?[\d,]+)", text)
     if m:
         return m.group(1).replace(",", "").strip()
@@ -32,31 +31,24 @@ def generate_answer(
     device: torch.device,
     max_new_tokens: int = 256,
 ) -> tuple[str, float]:
-    """Reasoner 잠재 표현 → DualTalker 자동 회귀 디코딩.
 
-    Returns:
-        (generated_text, latency_sec)
-    """
     reasoner.eval()
     talker.eval()
 
     prompt = f"Question: {question}\nAnswer:"
     input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
 
-    # ── 시간 측정 시작 ──
+    # starting timer
     if device.type == "cuda":
         torch.cuda.synchronize()
     t_start = time.perf_counter()
 
-    # 1) 잠재 표현 추출
     latents = reasoner(input_ids, reasoning_steps=1).squeeze(1)   # (1, Q, D)
 
-    # 2) DualTalker 인코더 → memory
     memory = talker.encoder(latents)
 
-    # 3) 자동 회귀 디코딩
     eos_id = tokenizer.eos_token_id
-    generated = torch.tensor([[eos_id]], dtype=torch.long, device=device)  # BOS 대용
+    generated = torch.tensor([[eos_id]], dtype=torch.long, device=device)
 
     for _ in range(max_new_tokens):
         tgt_emb  = talker.embedding(generated)
@@ -74,7 +66,7 @@ def generate_answer(
     if device.type == "cuda":
         torch.cuda.synchronize()
     latency = time.perf_counter() - t_start
-    # ── 시간 측정 끝 ──
+    # end of timer
 
     text = tokenizer.decode(generated[0, 1:], skip_special_tokens=True)
     return text, latency
@@ -87,12 +79,10 @@ def evaluate_gsm8k(
     max_samples: int | None = None,
     max_new_tokens: int = 256,
 ) -> tuple[float, list[dict]]:
-    """GSM8K 테스트셋 정확도 + 추론 시간(Mean / Std / Median) 평가.
-
-    Returns:
-        accuracy (float): 0-100 %
-        details  (list[dict]): 문제별 결과 (latency 포함)
-    """
+    
+    # accuracy (float): 0-100 %
+    # details  (list[dict]): result per question (w/ latency)
+    
     test = load_dataset("openai/gsm8k", "main", split="test")
     if max_samples:
         test = test.select(range(min(max_samples, len(test))))
@@ -100,10 +90,6 @@ def evaluate_gsm8k(
     correct, total = 0, 0
     details: list[dict] = []
     latencies: list[float] = []
-
-    print(f"\n{'─' * 60}")
-    print(f"  GSM8K Evaluation (JEPA-Reasoner)  │  {len(test)} samples")
-    print(f"{'─' * 60}")
 
     t0 = time.time()
 
@@ -144,7 +130,7 @@ def evaluate_gsm8k(
                 f"Speed: {speed:.1f} q/s  ETA: {eta:.0f}s"
             )
 
-    # ── 통계 계산 ─────────────────────────────────────────────────────────
+
     acc        = correct / total * 100
     lat_arr    = np.array(latencies)
     lat_mean   = float(np.mean(lat_arr))
@@ -162,20 +148,15 @@ def evaluate_gsm8k(
     return acc, details
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  Main
-# ══════════════════════════════════════════════════════════════════════════════
 def main(cfg: Config):
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # ── Tokenizer ─────────────────────────────────────────────────────────
     tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer.name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     vocab_size = len(tokenizer)
 
-    # ── Reasoner ──────────────────────────────────────────────────────────
     reasoner = JEPAReasoner(
         vocab_size=vocab_size,
         embed_dim=cfg.model.embed_dim,
@@ -187,16 +168,13 @@ def main(cfg: Config):
     ckpt_r = cfg.evaluate.reasoner_ckpt
     if os.path.exists(ckpt_r):
         state = torch.load(ckpt_r, map_location=device, weights_only=False)
-        # state 가 dict 전체(step, model_state_dict, …) 인 경우와 state_dict 만인 경우 모두 대응
         if "model_state_dict" in state:
             reasoner.load_state_dict(state["model_state_dict"])
         else:
             reasoner.load_state_dict(state)
-        print(f"✓ Loaded Reasoner  ← {ckpt_r}")
     else:
         raise FileNotFoundError(f"Reasoner checkpoint not found: {ckpt_r}")
 
-    # ── Talker ────────────────────────────────────────────────────────────
     talker = DualTalker(
         vocab_size=vocab_size,
         embed_dim=cfg.model.embed_dim,
@@ -211,24 +189,20 @@ def main(cfg: Config):
         talker.load_state_dict(
             torch.load(ckpt_t, map_location=device, weights_only=False)
         )
-        print(f"✓ Loaded Talker    ← {ckpt_t}")
     else:
         raise FileNotFoundError(f"Talker checkpoint not found: {ckpt_t}")
 
-    # ── 평가 실행 ─────────────────────────────────────────────────────────
     accuracy, details = evaluate_gsm8k(
         reasoner, talker, tokenizer, device,
         max_samples=cfg.evaluate.max_samples,
         max_new_tokens=cfg.evaluate.max_new_tokens,
     )
 
-    # ── 통계 계산 (details 에서 추출) ──────────────────────────────────────
     lat_arr    = np.array([d["latency_sec"] for d in details])
     lat_mean   = float(np.mean(lat_arr))
     lat_std    = float(np.std(lat_arr, ddof=1)) if len(lat_arr) > 1 else 0.0
     lat_median = float(np.median(lat_arr))
 
-    # ── 결과 저장 ─────────────────────────────────────────────────────────
     os.makedirs(cfg.evaluate.output_dir, exist_ok=True)
 
     result_path = os.path.join(cfg.evaluate.output_dir, "eval_results.json")
@@ -246,16 +220,12 @@ def main(cfg: Config):
             },
             f, indent=2,
         )
-    print(f"  Summary  → {result_path}")
 
     detail_path = os.path.join(cfg.evaluate.output_dir, "eval_details.jsonl")
     with open(detail_path, "w") as f:
         for d in details:
             f.write(json.dumps(d, ensure_ascii=False) + "\n")
-    print(f"  Details  → {detail_path}")
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     cfg = get_config_from_cli("JEPA-Reasoner GSM8K Evaluation")
     main(cfg)

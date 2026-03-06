@@ -1,23 +1,10 @@
-"""
-JEPA-Reasoner  ──  Configuration Loader
-========================================
-YAML 기반 설정 파일을 파이썬 dataclass 로 변환.
-모든 스크립트(pretrain / finetuning / evaluate)가 공유한다.
-"""
-
 from __future__ import annotations
-
 import argparse
 import os
 from dataclasses import dataclass, field
 from typing import Optional
-
 import yaml
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  Dataclass 정의
-# ══════════════════════════════════════════════════════════════════════════════
 @dataclass
 class ModelConfig:
     embed_dim:  int = 384
@@ -101,7 +88,6 @@ class EvaluateConfig:
 
 @dataclass
 class Config:
-    """전체 설정을 하나로 묶는 최상위 dataclass."""
     model:      ModelConfig      = field(default_factory=ModelConfig)
     talker:     TalkerConfig     = field(default_factory=TalkerConfig)
     tokenizer:  TokenizerConfig  = field(default_factory=TokenizerConfig)
@@ -114,12 +100,7 @@ class Config:
     evaluate:   EvaluateConfig   = field(default_factory=EvaluateConfig)
     device:     str              = "cuda"
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  로더
-# ══════════════════════════════════════════════════════════════════════════════
 def _dict_to_dataclass(dc_cls, d: dict):
-    """딕셔너리를 dataclass 인스턴스로 안전하게 변환."""
     if d is None:
         return dc_cls()
     filtered = {k: v for k, v in d.items() if k in dc_cls.__dataclass_fields__}
@@ -127,7 +108,6 @@ def _dict_to_dataclass(dc_cls, d: dict):
 
 
 def load_config(path: str) -> Config:
-    """YAML 파일로부터 Config 객체를 생성한다."""
     with open(path, "r") as f:
         raw = yaml.safe_load(f)
 

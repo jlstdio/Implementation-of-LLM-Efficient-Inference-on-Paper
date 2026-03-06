@@ -1,16 +1,3 @@
-#!/usr/bin/env python
-"""
-JEPA-Reasoner  ──  Phase 1: Pretraining on C4 + Wikitext
-=========================================================
-* 300,000 steps (논문 명시)
-* 목적: 기본 언어 능력 및 세상 지식 습득
-* L2 정규화 비활성화, Tied Embedding LM Head 사용
-* C4 70 % + Wikitext-103 30 % 혼합 스트리밍 데이터
-
-Usage:
-    python pretrain.py --config config.yaml
-"""
-
 import json
 import math
 import os
@@ -21,21 +8,13 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, IterableDataset
 from datasets import load_dataset, interleave_datasets
 from transformers import AutoTokenizer
+from accelerate import Accelerator
 
 from jepa_reasoner import JEPAReasoner
 from config import Config, get_config_from_cli
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Dataset
-# ──────────────────────────────────────────────────────────────────────────────
 class StreamingPretrainDataset(IterableDataset):
-    """C4 + Wikitext-103 을 결합한 스트리밍 사전학습 데이터셋.
-
-    텍스트를 토큰화한 뒤 `max_length` 단위로 잘라서
-    (input_ids, target_ids) 쌍을 생성한다 (next-token prediction).
-    """
-
     def __init__(self, tokenizer, max_length: int = 512, c4_ratio: float = 0.7, seed: int = 42):
         super().__init__()
         self.tokenizer = tokenizer
@@ -83,13 +62,7 @@ class StreamingPretrainDataset(IterableDataset):
                 target_ids = torch.tensor(chunk[1:],  dtype=torch.long)
                 yield input_ids, target_ids
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# LR Scheduler
-# ──────────────────────────────────────────────────────────────────────────────
 def get_cosine_schedule_with_warmup(optimizer, warmup_steps: int, max_steps: int):
-    """Warmup → Cosine decay 스케줄러."""
-
     def lr_lambda(step):
         if step < warmup_steps:
             return float(step) / float(max(1, warmup_steps))
@@ -98,44 +71,41 @@ def get_cosine_schedule_with_warmup(optimizer, warmup_steps: int, max_steps: int
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Pretraining
-# ──────────────────────────────────────────────────────────────────────────────
 def pretrain(cfg: Config):
-    pt  = cfg.pretrain          # PretrainConfig
-    mc  = cfg.model             # ModelConfig
-    dc  = cfg.data              # DataConfig
+    pt  = cfg.pretrain
+    mc  = cfg.model
+    dc  = cfg.data
 
-    device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    # ── Accelerator (handles DDP + mixed precision) ───────────────────
+    mixed_precision = "fp16" if pt.fp16 else "no"
+    accelerator = Accelerator(mixed_precision=mixed_precision)
+    device = accelerator.device
 
-    # ── Tokenizer ─────────────────────────────────────────────────────────
+    if accelerator.is_main_process:
+        print(f"Device: {device}  |  Num GPUs: {accelerator.num_processes}")
+
     tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer.name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     vocab_size = len(tokenizer)
 
-    # ── Model ─────────────────────────────────────────────────────────────
     model = JEPAReasoner(
         vocab_size=vocab_size,
         embed_dim=mc.embed_dim,
         num_heads=mc.num_heads,
         ffn_dim=mc.ffn_dim,
         num_layers=mc.num_layers,
-    ).to(device)
+    )
 
     num_params = sum(p.numel() for p in model.parameters())
-    print(f"Model parameters: {num_params:,}")
-
-    # [Phase-1 설정 1] L2 정규화 비활성화
     model.hybrid_norm.rms_norm.weight.requires_grad = False
 
-    # [Phase-1 설정 2] Tied Embeddings
-    temp_lm_head = nn.Linear(mc.embed_dim, vocab_size, bias=False).to(device)
-    temp_lm_head.weight = model.embedding.weight
+    per_device_batch = pt.batch_size // accelerator.num_processes
+    assert pt.batch_size % accelerator.num_processes == 0, (
+        f"batch_size ({pt.batch_size}) must be divisible by "
+        f"num_processes ({accelerator.num_processes})"
+    )
 
-    # ── Dataset & DataLoader ──────────────────────────────────────────────
     dataset = StreamingPretrainDataset(
         tokenizer=tokenizer,
         max_length=dc.max_length,
@@ -144,12 +114,11 @@ def pretrain(cfg: Config):
     )
     dataloader = DataLoader(
         dataset,
-        batch_size=pt.batch_size,
+        batch_size=per_device_batch,
         num_workers=0,
-        pin_memory=(device.type == "cuda"),
+        pin_memory=True,
     )
 
-    # ── Optimizer & Scheduler ─────────────────────────────────────────────
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=pt.learning_rate,
@@ -159,22 +128,30 @@ def pretrain(cfg: Config):
     scheduler = get_cosine_schedule_with_warmup(optimizer, pt.warmup_steps, pt.max_steps)
     criterion = nn.CrossEntropyLoss()
 
-    # ── Mixed Precision ───────────────────────────────────────────────────
-    use_amp = pt.fp16 and device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda") if use_amp else None
+    # ── Prepare with Accelerator (DDP + device placement) ─────────────
+    model, optimizer, dataloader, scheduler = accelerator.prepare(
+        model, optimizer, dataloader, scheduler
+    )
 
-    # ── 출력 디렉토리 ─────────────────────────────────────────────────────
-    os.makedirs(pt.output_dir, exist_ok=True)
+    # LM head shares embedding weights (access via unwrapped model)
+    raw_model = accelerator.unwrap_model(model)
+    temp_lm_head = nn.Linear(mc.embed_dim, vocab_size, bias=False).to(device)
+    temp_lm_head.weight = raw_model.embedding.weight
 
-    meta = {"vocab_size": vocab_size, "num_params": num_params}
-    with open(os.path.join(pt.output_dir, "pretrain_meta.json"), "w") as f:
-        json.dump(meta, f, indent=2)
+    if accelerator.is_main_process:
+        os.makedirs(pt.output_dir, exist_ok=True)
+        meta = {"vocab_size": vocab_size, "num_params": num_params}
+        with open(os.path.join(pt.output_dir, "pretrain_meta.json"), "w") as f:
+            json.dump(meta, f, indent=2)
 
-    # ── 학습 루프 ─────────────────────────────────────────────────────────
-    print(f"\n{'=' * 60}")
-    print(f"  Phase 1: Pretraining  |  Target: {pt.max_steps:,} steps")
-    print(f"  Batch: {pt.batch_size}  |  SeqLen: {dc.max_length}  |  FP16: {use_amp}")
-    print(f"{'=' * 60}\n")
+    if accelerator.is_main_process:
+        print(f"\n{'=' * 60}")
+        print(f"  Phase 1: Pretraining  |  Target: {pt.max_steps:,} steps")
+        print(
+            f"  Batch: {per_device_batch} x {accelerator.num_processes} GPUs"
+            f" = {pt.batch_size}  |  SeqLen: {dc.max_length}  |  FP16: {pt.fp16}"
+        )
+        print(f"{'=' * 60}\n")
 
     model.train()
     global_step = 0
@@ -184,38 +161,22 @@ def pretrain(cfg: Config):
 
     while global_step < pt.max_steps:
         for input_ids, target_ids in dataloader:
-            input_ids  = input_ids.to(device)
-            target_ids = target_ids.to(device)
-
-            if use_amp:
-                with torch.amp.autocast("cuda"):
-                    latents = model(input_ids, reasoning_steps=1).squeeze(1)
-                    logits  = temp_lm_head(latents)
-                    loss    = criterion(logits.view(-1, vocab_size), target_ids.view(-1))
-
-                optimizer.zero_grad(set_to_none=True)
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), pt.max_grad_norm)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
+            with accelerator.autocast():
                 latents = model(input_ids, reasoning_steps=1).squeeze(1)
                 logits  = temp_lm_head(latents)
                 loss    = criterion(logits.view(-1, vocab_size), target_ids.view(-1))
 
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), pt.max_grad_norm)
-                optimizer.step()
-
+            optimizer.zero_grad(set_to_none=True)
+            accelerator.backward(loss)
+            accelerator.clip_grad_norm_(model.parameters(), pt.max_grad_norm)
+            optimizer.step()
             scheduler.step()
+
             global_step += 1
             running_loss += loss.item()
             log_steps += 1
 
-            # ── 로깅 ──
-            if global_step % pt.log_interval == 0:
+            if global_step % pt.log_interval == 0 and accelerator.is_main_process:
                 avg_loss = running_loss / log_steps
                 elapsed  = time.time() - start_time
                 speed    = global_step / elapsed
@@ -230,36 +191,34 @@ def pretrain(cfg: Config):
                 running_loss = 0.0
                 log_steps = 0
 
-            # ── 체크포인트 ──
             if global_step % pt.save_interval == 0:
-                ckpt_path = os.path.join(pt.output_dir, f"checkpoint_step{global_step}.pt")
-                torch.save(
-                    {
-                        "step": global_step,
-                        "model_state_dict": model.state_dict(),
-                        "optimizer_state_dict": optimizer.state_dict(),
-                        "scheduler_state_dict": scheduler.state_dict(),
-                    },
-                    ckpt_path,
-                )
-                print(f"  ✓ Saved checkpoint → {ckpt_path}")
+                accelerator.wait_for_everyone()
+                if accelerator.is_main_process:
+                    ckpt_path = os.path.join(pt.output_dir, f"checkpoint_step{global_step}.pt")
+                    unwrapped = accelerator.unwrap_model(model)
+                    torch.save(
+                        {
+                            "step": global_step,
+                            "model_state_dict": unwrapped.state_dict(),
+                            "optimizer_state_dict": optimizer.state_dict(),
+                            "scheduler_state_dict": scheduler.state_dict(),
+                        },
+                        ckpt_path,
+                    )
+                    print(f"  ✓ Saved checkpoint → {ckpt_path}")
 
             if global_step >= pt.max_steps:
                 break
 
-    # ── 최종 저장 ─────────────────────────────────────────────────────────
-    final_path = os.path.join(pt.output_dir, "jepa_pretrained_final.pt")
-    torch.save(
-        {"step": global_step, "model_state_dict": model.state_dict()},
-        final_path,
-    )
-    total_h = (time.time() - start_time) / 3600
-    print(f"\n{'=' * 60}")
-    print(f"  Pretraining complete!  ({total_h:.1f} h)")
-    print(f"  Final model → {final_path}")
-    print(f"{'=' * 60}\n")
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        final_path = os.path.join(pt.output_dir, "jepa_pretrained_final.pt")
+        unwrapped = accelerator.unwrap_model(model)
+        torch.save(
+            {"step": global_step, "model_state_dict": unwrapped.state_dict()},
+            final_path,
+        )
+        # total_h = (time.time() - start_time) / 3600
 
-
-# ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     pretrain(get_config_from_cli("JEPA-Reasoner Phase 1: Pretraining"))

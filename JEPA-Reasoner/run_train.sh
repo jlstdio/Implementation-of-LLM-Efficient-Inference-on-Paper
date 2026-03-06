@@ -28,6 +28,7 @@ pip install --quiet --upgrade \
     torch \
     transformers \
     datasets \
+    accelerate \
     sentencepiece \
     pyyaml
 
@@ -46,15 +47,21 @@ print('  ✓ 데이터셋 준비 완료')
 "
 
 # ── 2. Phase 1: Pretraining ──────────────────────────────────────────
+# Auto-detect available GPUs
+NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
+NUM_GPUS=${NUM_GPUS:-1}
+echo ""
+echo "  Detected ${NUM_GPUS} GPU(s)"
+
 echo ""
 echo "[2/4] Phase 1 — Pretraining on C4 + Wikitext …"
-python pretrain.py --config "$CONFIG"
+accelerate launch --num_processes=$NUM_GPUS pretrain.py --config "$CONFIG"
 echo "  ✓ Phase 1 complete"
 
 # ── 3. Phase 2–4: Fine-tuning ────────────────────────────────────────
 echo ""
 echo "[3/4] Phase 2-4 — Fine-tuning on GSM8K …"
-python finetuning.py --config "$CONFIG"
+accelerate launch --num_processes=$NUM_GPUS finetuning.py --config "$CONFIG"
 echo "  ✓ Phase 2-4 complete"
 
 # ── 4. Evaluation ────────────────────────────────────────────────────

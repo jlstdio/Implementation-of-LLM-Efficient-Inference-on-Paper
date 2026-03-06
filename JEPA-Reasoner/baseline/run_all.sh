@@ -58,6 +58,12 @@ NAMES=(
 
 TOTAL=${#CONFIGS[@]}
 
+# ── Auto-detect available GPUs ────────────────────────────────────────
+NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
+NUM_GPUS=${NUM_GPUS:-1}
+echo ""
+echo "  Detected ${NUM_GPUS} GPU(s)"
+
 # ── 2. Fine-tune 루프 ────────────────────────────────────────────────
 echo ""
 echo "[2/6] Fine-tuning ${TOTAL} baseline models …"
@@ -67,7 +73,7 @@ for idx in "${!CONFIGS[@]}"; do
     step=$(( idx + 1 ))
     echo ""
     echo "  ── [${step}/${TOTAL}] Fine-tune: ${name} ──"
-    python finetune.py --config "$cfg"
+    accelerate launch --num_processes=$NUM_GPUS finetune.py --config "$cfg"
 done
 echo ""
 echo "  ✓ All fine-tuning complete"
