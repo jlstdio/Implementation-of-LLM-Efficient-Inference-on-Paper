@@ -1,0 +1,36 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  Baseline: google/gemma-3-1b-it
+# ═══════════════════════════════════════════════════════════════════════
+
+model:
+  name: "google/gemma-3-1b-it"
+  short_name: "gemma-3-1b-it"
+
+training:
+  epochs: 3
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.06
+  max_grad_norm: 1.0
+  fp16: true
+  max_length: 512
+  log_interval: 50
+  save_strategy: "epoch"
+
+data:
+  dataset: "openai/gsm8k"
+  split_train: "train"
+  split_test: "test"
+  max_train_samples: null
+  max_eval_samples: null
+
+evaluate:
+  max_new_tokens: 256
+  temperature: 0.0
+
+output:
+  dir: "./checkpoints/baseline/gemma-3-1b-it"
+
+device: "cuda"

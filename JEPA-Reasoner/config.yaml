@@ -1,0 +1,77 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  JEPA-Reasoner  ──  All-in-One Configuration
+# ═══════════════════════════════════════════════════════════════════════
+
+# ── Model: Reasoner (JEPA-Reasoner) ──────────────────────────────────
+model:
+  embed_dim:    384
+  num_heads:    16
+  ffn_dim:      1536
+  num_layers:   18
+
+# ── Model: Talker (DualTalker) ───────────────────────────────────────
+talker:
+  num_heads:    8
+  enc_layers:   4
+  dec_layers:   4
+
+# ── Tokenizer ────────────────────────────────────────────────────────
+tokenizer:
+  name: "gpt2"
+
+# ── Data ─────────────────────────────────────────────────────────────
+data:
+  max_length:   512           # Phase 1 & 2 시퀀스 길이
+  max_q_len:    256           # Phase 3-4 질문 토큰 길이
+  max_a_len:    256           # Phase 3-4 답변 토큰 길이
+  c4_ratio:     0.7           # C4 / Wikitext 혼합 비율
+  seed:         42
+
+# ── Phase 1: Pretraining (C4 + Wikitext) ─────────────────────────────
+pretrain:
+  max_steps:      300000
+  batch_size:     32
+  learning_rate:  1.0e-4
+  weight_decay:   0.01
+  warmup_steps:   2000
+  max_grad_norm:  1.0
+  fp16:           true
+  log_interval:   100
+  save_interval:  10000
+  output_dir:     "./checkpoints/pretrain"
+
+# ── Phase 2: Math Fine-tuning (GSM8K) ────────────────────────────────
+phase2:
+  max_steps:      42000
+  learning_rate:  1.0e-4
+  batch_size:     16
+  num_workers:    4
+  log_interval:   100
+
+# ── Phase 3: Self-Supervised Training (SST) ──────────────────────────
+phase3:
+  epochs:         5
+  learning_rate:  1.0e-4
+  ema_momentum:   0.98
+  cosine_k:       4.0
+
+# ── Phase 4: Talker Training ─────────────────────────────────────────
+phase4:
+  epochs:         5
+  learning_rate:  1.0e-4
+
+# ── Fine-tuning (공통) ───────────────────────────────────────────────
+finetune:
+  pretrained_ckpt:  "./checkpoints/pretrain/jepa_pretrained_final.pt"
+  output_dir:       "./checkpoints/finetune"
+
+# ── Evaluation ───────────────────────────────────────────────────────
+evaluate:
+  max_samples:      null      # null = 전체 테스트셋
+  max_new_tokens:   256
+  output_dir:       "./checkpoints/finetune"
+  reasoner_ckpt:    "./checkpoints/finetune/reasoner_after_phase3.pt"
+  talker_ckpt:      "./checkpoints/finetune/talker_after_phase4.pt"
+
+# ── Device ───────────────────────────────────────────────────────────
+device: "cuda"
