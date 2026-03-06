@@ -35,7 +35,7 @@ class ModifiedAttention(nn.Module):
         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=False)
         self.out_proj = nn.Linear(embed_dim, embed_dim)
         
-        # QK-Norm
+        # QK Norm
         self.q_norm = nn.LayerNorm(self.head_dim, elementwise_affine=False)
         self.k_norm = nn.LayerNorm(self.head_dim, elementwise_affine=False)
 

@@ -1,0 +1,101 @@
+llm:
+  name:               "meta-llama/Llama-3.2-3B"
+  short_name:         "Llama-3.2-3B"
+  torch_dtype:        "float16"
+  trust_remote_code:  true
+
+tlm:
+  backbone:           "google/mobilebert-uncased"
+  shared_layers:      12
+  num_prompt_levels:  9
+  num_model_levels:   9
+  slo_tokens:
+    - "[TTFT_50]"
+    - "[TTFT_100]"
+    - "[TTFT_200]"
+    - "[TTFT_500]"
+    - "[TPOT_20]"
+    - "[TPOT_40]"
+    - "[TPOT_80]"
+    - "[TPOT_160]"
+
+elastic:
+  ratios:             [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  anchor_top_pct:     0.20
+  importance_dataset: "bookcorpus"
+  importance_samples: 512
+  importance_batch:   4
+
+lora:
+  r:                  8
+  alpha:              16
+  dropout:            0.05
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+
+data:
+  max_length:         512
+  seed:               42
+  meetingbank_split:  "train"
+  mmlu_pro_split:     "test"
+  alpaca_max_samples: 50000
+
+train_score:
+  epochs:             5
+  batch_size:         16
+  learning_rate:      2.0e-5
+  weight_decay:       0.01
+  warmup_steps:       500
+  max_grad_norm:      1.0
+  log_interval:       50
+
+train_decision:
+  epochs:             5
+  batch_size:         8
+  learning_rate:      2.0e-5
+  weight_decay:       0.01
+  warmup_steps:       200
+  max_grad_norm:      1.0
+  log_interval:       50
+  label_cache_dir:    "./checkpoints/decision_labels"
+
+train_lora:
+  epochs:             3
+  batch_size:         4
+  learning_rate:      1.0e-4
+  weight_decay:       0.01
+  warmup_steps:       200
+  max_grad_norm:      1.0
+  fp16:               true
+  log_interval:       100
+  gradient_accumulation_steps: 4
+
+evaluate:
+  datasets:
+    - "arc_easy"
+    - "piqa"
+    - "mmlu_pro"
+  n_shot:             5
+  max_new_tokens:     256
+  max_eval_samples:   null
+  slo_scenarios:
+    - { ttft_ms: 50,  tpot_ms: 20  }
+    - { ttft_ms: 100, tpot_ms: 40  }
+    - { ttft_ms: 200, tpot_ms: 80  }
+    - { ttft_ms: 500, tpot_ms: 160 }
+  measure_overhead:   true
+
+output:
+  base_dir:           "./checkpoints"
+  elastic_dir:        "./checkpoints/elastic"
+  lora_dir:           "./checkpoints/lora"
+  tlm_dir:            "./checkpoints/tlm"
+  eval_dir:           "./checkpoints/eval"
+
+device: "cuda"

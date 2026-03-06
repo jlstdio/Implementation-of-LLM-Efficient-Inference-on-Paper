@@ -76,7 +76,7 @@ def pretrain(cfg: Config):
     mc  = cfg.model
     dc  = cfg.data
 
-    # ── Accelerator (handles DDP + mixed precision) ───────────────────
+    # Accelerator (handles DDP + mixed precision)
     mixed_precision = "fp16" if pt.fp16 else "no"
     accelerator = Accelerator(mixed_precision=mixed_precision)
     device = accelerator.device
@@ -128,7 +128,7 @@ def pretrain(cfg: Config):
     scheduler = get_cosine_schedule_with_warmup(optimizer, pt.warmup_steps, pt.max_steps)
     criterion = nn.CrossEntropyLoss()
 
-    # ── Prepare with Accelerator (DDP + device placement) ─────────────
+    # Prepare with Accelerator
     model, optimizer, dataloader, scheduler = accelerator.prepare(
         model, optimizer, dataloader, scheduler
     )
