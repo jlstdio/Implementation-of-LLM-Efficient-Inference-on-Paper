@@ -380,12 +380,14 @@ def elasticalize_model(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # 중요도 프로파일링을 위해 단일 GPU에 float32로 로드
+    # (device_map="auto" 사용 시 multi-GPU dispatch + backward()에서
+    #  device 불일치로 CUDA assert 발생하므로 단일 디바이스에 올림)
     model = AutoModelForCausalLM.from_pretrained(
         cfg.llm.name,
-        torch_dtype=torch_dtype,
+        torch_dtype=torch.float32,
         trust_remote_code=cfg.llm.trust_remote_code,
-        device_map="auto" if device.type == "cuda" else None,
-    )
+    ).to(device)
 
     model_config = model.config
     num_layers = model_config.num_hidden_layers
@@ -398,9 +400,7 @@ def elasticalize_model(
     # ── 2. 중요도 프로파일링 ─────────────────────────────────────────
     print("  [2/5] Computing importance scores …")
 
-    # float32로 변환하여 그래디언트 계산
-    model_fp32 = model.float()
-    model_fp32.train()
+    model.train()
 
     ds = SimpleTextDataset(
         tokenizer=tokenizer,
@@ -414,23 +414,25 @@ def elasticalize_model(
         collate_fn=_collate_fn,
         shuffle=False,
     )
-    importance = compute_importance_scores(model_fp32, loader, device)
+    importance = compute_importance_scores(model, loader, device)
     print(f"        Profiled {len(ds)} samples, {len(importance)} parameters")
 
     # ── 3. 순열 불변 단위 재정렬 ─────────────────────────────────────
     print("  [3/5] Reordering permutation-invariant units …")
-    model_fp32.eval()
+    model.eval()
 
     for layer_idx in range(num_layers):
-        layer = model_fp32.model.layers[layer_idx]
+        layer = model.model.layers[layer_idx]
         reorder_mlp_units(layer, importance, layer_idx)
         reorder_attention_units(
             layer, importance, layer_idx,
             num_heads, num_kv_heads, head_dim,
         )
 
-    # 원래 dtype으로 복원
-    model = model_fp32.to(torch_dtype)
+    # 추론용 dtype으로 변환 (float16 / bfloat16)
+    dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
+    torch_dtype = dtype_map.get(cfg.llm.torch_dtype, torch.float16)
+    model = model.to(torch_dtype)
 
     # ── 4. 앵커 레이어 식별 ──────────────────────────────────────────
     print("  [4/5] Identifying anchor layers …")
