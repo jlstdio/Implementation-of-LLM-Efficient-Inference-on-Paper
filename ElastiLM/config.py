@@ -29,7 +29,7 @@ class TLMConfig:
 class ElasticConfig:
     ratios:              list  = field(default_factory=lambda: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
     anchor_top_pct:      float = 0.20     # 상위 20% 레이어는 앵커(100% 유지)
-    importance_dataset:  str   = "bookcorpus"
+    importance_dataset:  str   = "wikitext"
     importance_samples:  int   = 512      # 중요도 프로파일링에 사용할 샘플 수
     importance_batch:    int   = 4
 

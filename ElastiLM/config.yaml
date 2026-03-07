@@ -25,7 +25,7 @@ tlm:
 elastic:
   ratios:             [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
   anchor_top_pct:     0.20      # 상위 20% 레이어 = 앵커
-  importance_dataset: "bookcorpus"
+  importance_dataset: "wikitext"
   importance_samples: 512
   importance_batch:   4
 

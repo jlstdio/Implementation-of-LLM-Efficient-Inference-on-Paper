@@ -23,8 +23,11 @@ class SimpleTextDataset(Dataset):
         super().__init__()
         from datasets import load_dataset
 
-        if dataset_name == "bookcorpus":
-            raw = load_dataset("bookcorpus", split="train", streaming=True)
+        if dataset_name == "wikitext":
+            raw = load_dataset(
+                "wikitext", "wikitext-103-raw-v1",
+                split="train", streaming=True,
+            )
         else:
             raw = load_dataset(dataset_name, split="train", streaming=True)
 
