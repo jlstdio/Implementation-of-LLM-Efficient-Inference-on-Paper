@@ -16,17 +16,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 CONFIG="${1:-config.yaml}"
-GPUS="${2:-}"                     # 두 번째 인자: 사용할 단일 GPU (예: "1" 또는 "2")
+GPUS="${2:-}"                     # 두 번째 인자: 사용할 GPU (예: "1,2" 또는 "3,4")
 
-# ── GPU 설정 (단일 GPU) ──────────────────────────────────────────────
+# ── GPU 설정 ─────────────────────────────────────────────────────────
 if [[ -n "$GPUS" ]]; then
     export CUDA_VISIBLE_DEVICES="$GPUS"
+    NUM_GPUS=$(echo "$GPUS" | tr ',' '\n' | wc -l)
+else
+    NUM_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l)
+    NUM_GPUS=${NUM_GPUS:-1}
 fi
 
 echo "╔═══════════════════════════════════════════════════════════╗"
 echo "║         ElastiLM  ·  Full Training Pipeline              ║"
 echo "║         Config : ${CONFIG}                               ║"
-echo "║         GPU    : CUDA ${CUDA_VISIBLE_DEVICES:-all}       ║"
+echo "║         GPUs   : CUDA ${CUDA_VISIBLE_DEVICES:-all} (${NUM_GPUS})  ║"
 echo "╚═══════════════════════════════════════════════════════════╝"
 
 # ── Step 0: Elasticalize ─────────────────────────────────────────────
@@ -38,19 +42,19 @@ echo "  ✓ Step 0 complete"
 # ── Step 1: LoRA Recovery ────────────────────────────────────────────
 echo ""
 echo "[1/4] Step 1 — LoRA Recovery Training (Alpaca-cleaned) …"
-python train.py --config "$CONFIG" --phase lora
+accelerate launch --num_processes=$NUM_GPUS train.py --config "$CONFIG" --phase lora
 echo "  ✓ Step 1 complete"
 
 # ── Step 2: TLM Score-head ───────────────────────────────────────────
 echo ""
 echo "[2/4] Step 2 — TLM Score-head Training (MeetingBank) …"
-python train.py --config "$CONFIG" --phase score
+accelerate launch --num_processes=$NUM_GPUS train.py --config "$CONFIG" --phase score
 echo "  ✓ Step 2 complete"
 
 # ── Step 3: TLM Decision-head ────────────────────────────────────────
 echo ""
 echo "[3/4] Step 3 — TLM Decision-head Training (Self-induced) …"
-python train.py --config "$CONFIG" --phase decision
+accelerate launch --num_processes=$NUM_GPUS train.py --config "$CONFIG" --phase decision
 echo "  ✓ Step 3 complete"
 
 # ── Step 4: Evaluation ───────────────────────────────────────────────

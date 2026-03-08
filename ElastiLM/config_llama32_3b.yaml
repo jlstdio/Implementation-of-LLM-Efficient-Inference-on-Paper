@@ -48,7 +48,7 @@ data:
 
 train_score:
   epochs:             5
-  batch_size:         16
+  batch_size:         8
   learning_rate:      2.0e-5
   weight_decay:       0.01
   warmup_steps:       500
@@ -57,7 +57,7 @@ train_score:
 
 train_decision:
   epochs:             5
-  batch_size:         8
+  batch_size:         4
   learning_rate:      2.0e-5
   weight_decay:       0.01
   warmup_steps:       200
@@ -67,7 +67,7 @@ train_decision:
 
 train_lora:
   epochs:             3
-  batch_size:         4
+  batch_size:         8
   learning_rate:      1.0e-4
   weight_decay:       0.01
   warmup_steps:       200

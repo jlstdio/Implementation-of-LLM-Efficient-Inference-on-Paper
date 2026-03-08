@@ -85,8 +85,14 @@ def compute_importance_scores(
     }
     num_batches = 0
 
+    # device_map 모델인 경우 입력은 첫 번째 레이어의 device로 보냄
+    if hasattr(model, "hf_device_map"):
+        input_device = next(model.parameters()).device
+    else:
+        input_device = device
+
     for batch in dataloader:
-        batch = {k: v.to(device) for k, v in batch.items()}
+        batch = {k: v.to(input_device) for k, v in batch.items()}
         outputs = model(**batch)
         loss = outputs.loss
         loss.backward()
@@ -380,14 +386,13 @@ def elasticalize_model(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # 중요도 프로파일링을 위해 단일 GPU에 float32로 로드
-    # (device_map="auto" 사용 시 multi-GPU dispatch + backward()에서
-    #  device 불일치로 CUDA assert 발생하므로 단일 디바이스에 올림)
+    # 중요도 프로파일링을 위해 float32로 로드, device_map="auto"로 2 GPU 분산
     model = AutoModelForCausalLM.from_pretrained(
         cfg.llm.name,
         torch_dtype=torch.float32,
         trust_remote_code=cfg.llm.trust_remote_code,
-    ).to(device)
+        device_map="auto" if device.type == "cuda" else None,
+    )
 
     model_config = model.config
     num_layers = model_config.num_hidden_layers
@@ -400,6 +405,8 @@ def elasticalize_model(
     # ── 2. 중요도 프로파일링 ─────────────────────────────────────────
     print("  [2/5] Computing importance scores …")
 
+    # Gradient checkpointing 활성화 (multi-GPU backward 안전 + 메모리 절약)
+    model.gradient_checkpointing_enable()
     model.train()
 
     ds = SimpleTextDataset(
@@ -417,9 +424,15 @@ def elasticalize_model(
     importance = compute_importance_scores(model, loader, device)
     print(f"        Profiled {len(ds)} samples, {len(importance)} parameters")
 
+    # Gradient checkpointing 비활성화 (프로파일링 완료)
+    model.gradient_checkpointing_disable()
+
     # ── 3. 순열 불변 단위 재정렬 ─────────────────────────────────────
     print("  [3/5] Reordering permutation-invariant units …")
     model.eval()
+
+    # device_map 분산 모델을 CPU로 합침 (재정렬 시 텐서 일관성)
+    model = model.cpu()
 
     for layer_idx in range(num_layers):
         layer = model.model.layers[layer_idx]

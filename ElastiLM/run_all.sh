@@ -2,19 +2,19 @@
 # ═══════════════════════════════════════════════════════════════════════
 #  ElastiLM  ──  Full Pipeline (3B + 8B 동시 실행)
 #
-#  GPU 할당 (고정, 단일 GPU):
-#    • Llama 3.2 3B  →  CUDA 1  (~12GB fp32)
-#    • Llama 3.1 8B  →  CUDA 2  (~32GB fp32)
+#  GPU 할당 (고정, 2 GPU씩):
+#    • Llama 3.2 3B  →  CUDA 1,2  (~78GB total)
+#    • Llama 3.1 8B  →  CUDA 3,4  (~78GB total)
 #
-#  두 모델을 서로 다른 GPU에서 **동시에** 학습 & 평가합니다.
+#  두 모델을 서로 다른 GPU 쌍에서 **동시에** 학습 & 평가합니다.
 #  완료 후 compare.py로 같은 모델끼리 공평 비교 테이블을 출력합니다.
 #
 #  Usage:
 #    bash run_all.sh              # 3B + 8B 동시 (학습 + 평가)
 #    bash run_all.sh train        # 학습만 (Step 0~3)
 #    bash run_all.sh eval         # 평가만 (Step 4)
-#    bash run_all.sh 3b           # 3B만 (CUDA 1)
-#    bash run_all.sh 8b           # 8B만 (CUDA 2)
+#    bash run_all.sh 3b           # 3B만 (CUDA 1,2)
+#    bash run_all.sh 8b           # 8B만 (CUDA 3,4)
 # ═══════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -23,9 +23,9 @@ cd "$SCRIPT_DIR"
 
 MODE="${1:-all}"   # all | train | eval | 3b | 8b
 
-# ── GPU 할당 (고정, 단일 GPU) ────────────────────────────────────────
-GPUS_3B="1"
-GPUS_8B="2"
+# ── GPU 할당 (고정, 2 GPU씩) ────────────────────────────────────────
+GPUS_3B="1,2"
+GPUS_8B="3,4"
 CONFIG_3B="config_llama32_3b.yaml"
 CONFIG_8B="config.yaml"
 
@@ -36,8 +36,8 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 echo "╔═══════════════════════════════════════════════════════════════╗"
 echo "║         ElastiLM  ·  Full Pipeline (Parallel)               ║"
 echo "║                                                             ║"
-echo "║   Llama 3.2 3B  →  CUDA ${GPUS_3B}                                ║"
-echo "║   Llama 3.1 8B  →  CUDA ${GPUS_8B}                                ║"
+echo "║   Llama 3.2 3B  →  CUDA ${GPUS_3B}                            ║"
+echo "║   Llama 3.1 8B  →  CUDA ${GPUS_8B}                            ║"
 echo "║                                                             ║"
 echo "║   Mode : ${MODE}                                                ║"
 echo "╚═══════════════════════════════════════════════════════════════╝"
@@ -72,19 +72,20 @@ run_train_only() {
     echo "═══════════════════════════════════════════════════════════════"
 
     export CUDA_VISIBLE_DEVICES="$gpus"
+    local NUM_GPUS=$(echo "$gpus" | tr ',' '\n' | wc -l)
 
     (
-        echo "[0] Elasticalize …"
+        echo "[0] Elasticalize … (device_map=auto on ${NUM_GPUS} GPUs)"
         python model_elasticalize.py --config "$config"
 
-        echo "[1] LoRA Recovery …"
-        python train.py --config "$config" --phase lora
+        echo "[1] LoRA Recovery … (accelerate, ${NUM_GPUS} GPUs)"
+        accelerate launch --num_processes=$NUM_GPUS train.py --config "$config" --phase lora
 
-        echo "[2] TLM Score-head …"
-        python train.py --config "$config" --phase score
+        echo "[2] TLM Score-head … (accelerate, ${NUM_GPUS} GPUs)"
+        accelerate launch --num_processes=$NUM_GPUS train.py --config "$config" --phase score
 
-        echo "[3] TLM Decision-head …"
-        python train.py --config "$config" --phase decision
+        echo "[3] TLM Decision-head … (accelerate, ${NUM_GPUS} GPUs)"
+        accelerate launch --num_processes=$NUM_GPUS train.py --config "$config" --phase decision
 
         echo "  ✓ Training complete for ${name}"
     ) 2>&1 | tee "$log_file"

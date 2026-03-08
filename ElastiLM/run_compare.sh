@@ -2,8 +2,8 @@
 # ═══════════════════════════════════════════════════════════════════════
 #  ElastiLM  ──  Intra-Model Fair Comparison
 #  같은 모델 내에서 Base(원본) vs ElastiLM(탄력화) 비교:
-#    • Llama 3.2 3B : CUDA 1  →  Base 3B vs ElastiLM 3B
-#    • Llama 3.1 8B : CUDA 2  →  Base 8B vs ElastiLM 8B
+#    • Llama 3.2 3B : CUDA 1,2  →  Base 3B vs ElastiLM 3B
+#    • Llama 3.1 8B : CUDA 3,4  →  Base 8B vs ElastiLM 8B
 #
 #  Usage:
 #    bash run_compare.sh              # 두 모델 순차 평가 (기본 GPU 할당)
@@ -19,8 +19,8 @@ cd "$SCRIPT_DIR"
 TARGET="${1:-all}"   # "all" | "3b" | "8b" | config yaml path
 
 # ── GPU 할당 (고정) ──────────────────────────────────────────────────
-GPUS_3B="1"
-GPUS_8B="2"
+GPUS_3B="1,2"
+GPUS_8B="3,4"
 
 echo "╔═══════════════════════════════════════════════════════════════╗"
 echo "║   ElastiLM  ·  Intra-Model Fair Comparison                   ║"
