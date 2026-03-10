@@ -522,8 +522,14 @@ def apply_lora_to_model(
 def load_elastic_model(
     cfg: Config,
     device: torch.device,
+    use_device_map: bool = True,
 ) -> tuple[ElasticLlamaWrapper, AutoTokenizer]:
-    """저장된 탄력화 모델을 로드."""
+    """저장된 탄력화 모델을 로드.
+    
+    Args:
+        use_device_map: True면 device_map="auto"로 다중 GPU 분산 (추론용),
+                        False면 단일 device 로드 (학습 시 accelerator와 호환).
+    """
     ckpt_path = os.path.join(cfg.output.elastic_dir, "elasticalized_model")
     meta_path = os.path.join(cfg.output.elastic_dir, "elastic_meta.json")
 
@@ -541,7 +547,7 @@ def load_elastic_model(
         ckpt_path,
         torch_dtype=torch_dtype,
         trust_remote_code=cfg.llm.trust_remote_code,
-        device_map="auto" if device.type == "cuda" else None,
+        device_map="auto" if (use_device_map and device.type == "cuda") else None,
     )
 
     wrapper = ElasticLlamaWrapper(

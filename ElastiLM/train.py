@@ -50,15 +50,20 @@ def get_cosine_schedule_with_warmup(optimizer, warmup_steps: int, max_steps: int
 class AlpacaDataset(Dataset):
     """Alpaca-cleaned 데이터셋 for LoRA recovery."""
 
-    def __init__(self, tokenizer, max_length: int = 512, max_samples: int = 50000):
+    def __init__(self, tokenizer, max_length: int = 512, max_samples: int = 50000,
+                 vocab_size: int | None = None):
         super().__init__()
+        # pad_token_id가 None이면 eos_token_id를 사용
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token = tokenizer.eos_token
         self.pad_id = tokenizer.pad_token_id
+        self.vocab_size = vocab_size
 
         raw = load_dataset("yahma/alpaca-cleaned", split="train")
         if max_samples and len(raw) > max_samples:
             raw = raw.select(range(max_samples))
 
-        self.inputs, self.targets = [], []
+        self.inputs, self.labels, self.masks = [], [], []
         for item in raw:
             # Alpaca 형식 → 프롬프트 + 응답
             instruction = item.get("instruction", "")
@@ -70,16 +75,33 @@ class AlpacaDataset(Dataset):
             else:
                 text = f"### Instruction:\n{instruction}\n\n### Response:\n{output}{tokenizer.eos_token}"
 
-            ids = tokenizer.encode(text, max_length=max_length + 1, truncation=True)
-            ids = ids + [self.pad_id] * (max_length + 1 - len(ids))
-            self.inputs.append(torch.tensor(ids[:-1], dtype=torch.long))
-            self.targets.append(torch.tensor(ids[1:], dtype=torch.long))
+            # HuggingFace CausalLM은 내부에서 labels를 shift하므로 수동 shift 불필요
+            ids = tokenizer.encode(text, max_length=max_length, truncation=True)
+            seq_len = len(ids)
+
+            # vocab_size 범위를 벗어나는 토큰 ID가 있으면 해당 위치를 무시
+            if self.vocab_size is not None:
+                labels = [
+                    tid if 0 <= tid < self.vocab_size else -100
+                    for tid in ids
+                ]
+            else:
+                labels = list(ids)
+
+            # 패딩: input_ids는 pad_token_id, labels는 -100 (ignore_index)
+            input_ids = ids + [self.pad_id] * (max_length - seq_len)
+            labels = labels + [-100] * (max_length - seq_len)
+            attn_mask = [1] * seq_len + [0] * (max_length - seq_len)
+
+            self.inputs.append(torch.tensor(input_ids, dtype=torch.long))
+            self.labels.append(torch.tensor(labels, dtype=torch.long))
+            self.masks.append(torch.tensor(attn_mask, dtype=torch.long))
 
     def __len__(self):
         return len(self.inputs)
 
     def __getitem__(self, idx):
-        return self.inputs[idx], self.targets[idx]
+        return self.inputs[idx], self.labels[idx], self.masks[idx]
 
 
 def train_lora_recovery(cfg: Config, accelerator: Accelerator):
@@ -97,15 +119,46 @@ def train_lora_recovery(cfg: Config, accelerator: Accelerator):
         print(f"  Ratios: {cfg.elastic.ratios}")
         print(f"{'═' * 60}\n")
 
-    # ── 탄력화 모델 로드 ─────────────────────────────────────────────
-    wrapper, tokenizer = load_elastic_model(cfg, device)
+    # ── 탄력화 모델 로드 (tokenizer + vocab 확인) ────────────────────
+    # device_map="auto"는 accelerator.prepare()와 충돌 → 학습 시에는 비활성화
+    wrapper, tokenizer = load_elastic_model(cfg, device, use_device_map=False)
 
-    # ── 데이터셋 ─────────────────────────────────────────────────────
+    model_vocab_size = wrapper.model.config.vocab_size
+    lm_head_out = wrapper.model.lm_head.out_features
+    tok_vocab_size = len(tokenizer)
+
+    if accelerator.is_main_process:
+        print(f"    Model  config.vocab_size : {model_vocab_size}")
+        print(f"    Model  lm_head.out_feat  : {lm_head_out}")
+        print(f"    Tokenizer len            : {tok_vocab_size}")
+
+    # tokenizer vocab > model vocab → 임베딩 리사이즈 (cross_entropy OOR 방지)
+    if tok_vocab_size > model_vocab_size:
+        if accelerator.is_main_process:
+            print(f"    ⚠ Resizing embeddings {model_vocab_size} → {tok_vocab_size}")
+        wrapper.model.resize_token_embeddings(tok_vocab_size)
+        model_vocab_size = tok_vocab_size
+
+    # ── 데이터셋 (한 번만 생성) ──────────────────────────────────────
     dataset = AlpacaDataset(
         tokenizer=tokenizer,
         max_length=cfg.data.max_length,
         max_samples=cfg.data.alpaca_max_samples,
+        vocab_size=model_vocab_size,
     )
+
+    # ── 데이터 사전 검증 ─────────────────────────────────────────────
+    if accelerator.is_main_process:
+        all_labels = torch.cat([ds_lbl for _, ds_lbl, _ in dataset])
+        valid = all_labels[all_labels != -100]
+        print(f"    Dataset: {len(dataset)} samples, "
+              f"label range [{valid.min().item()}, {valid.max().item()}], "
+              f"must be < {model_vocab_size}")
+        if valid.max().item() >= model_vocab_size:
+            raise ValueError(
+                f"Label {valid.max().item()} >= vocab_size {model_vocab_size}! "
+                f"Tokenizer/model vocab mismatch."
+            )
 
     per_device_batch = tcfg.batch_size // accelerator.num_processes
     loader = DataLoader(
@@ -118,14 +171,24 @@ def train_lora_recovery(cfg: Config, accelerator: Accelerator):
     loader = accelerator.prepare(loader)
 
     # ── 각 ratio 별 LoRA 학습 ────────────────────────────────────────
+    # 매 ratio마다 깨끗한 base model을 재로드합니다.
+    # merge_and_unload()는 LoRA 가중치를 base model에 영구적으로 합치므로
+    # 다음 ratio 학습 시 오염된 base 위에 중첩 LoRA가 적용되어
+    # 모델 구조가 망가집니다 (8B → 3.2B 파라미터 축소 등).
     for ratio in cfg.elastic.ratios:
         ratio_str = f"{int(ratio * 100)}"
 
         if accelerator.is_main_process:
             print(f"\n  ── LoRA training for ratio={ratio:.0%} ──")
 
-        # 풀 모델에 LoRA 적용
-        base_model = wrapper.model
+        # 매 ratio마다 깨끗한 base model 재로드
+        wrapper_fresh, _ = load_elastic_model(cfg, device, use_device_map=False)
+        base_model = wrapper_fresh.model
+
+        # tokenizer/embedding 일관성
+        if tok_vocab_size > base_model.config.vocab_size:
+            base_model.resize_token_embeddings(tok_vocab_size)
+
         peft_model = apply_lora_to_model(base_model, cfg)
 
         optimizer = torch.optim.AdamW(
@@ -147,9 +210,13 @@ def train_lora_recovery(cfg: Config, accelerator: Accelerator):
         t0 = time.time()
 
         for epoch in range(1, tcfg.epochs + 1):
-            for step_in_epoch, (inp, tgt) in enumerate(loader):
+            for step_in_epoch, (inp, lbl, mask) in enumerate(loader):
                 with accelerator.autocast():
-                    outputs = peft_model(input_ids=inp, labels=tgt)
+                    outputs = peft_model(
+                        input_ids=inp,
+                        attention_mask=mask,
+                        labels=lbl,
+                    )
                     loss = outputs.loss / tcfg.gradient_accumulation_steps
 
                 accelerator.backward(loss)
@@ -181,8 +248,8 @@ def train_lora_recovery(cfg: Config, accelerator: Accelerator):
             unwrapped.save_pretrained(lora_path)
             print(f"    ✓ Saved LoRA adapter → {lora_path}")
 
-        # 정리: LoRA 제거하고 다음 ratio로
-        del peft_model, optimizer, scheduler
+        # 정리: 모델 전체 해제 (다음 ratio에서 깨끗하게 재로드)
+        del peft_model, optimizer, scheduler, base_model, wrapper_fresh
         accelerator.free_memory()
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
